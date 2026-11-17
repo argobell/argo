@@ -3,12 +3,78 @@ package schema
 import (
 	"math"
 	"math/big"
-	"regexp"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/dlclark/regexp2/v2"
+	"github.com/dlclark/regexp2/v2/compat"
 )
+
+func mustRegex(t *testing.T, source string) *compat.Regexp {
+	t.Helper()
+	re, err := compat.Compile(source, regexp2.ECMAScript|regexp2.Unicode, regexp2.OptionMaxBacktrackingStackSize(-1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return re
+}
+
+func TestRegexECMAScript(t *testing.T) {
+	for _, tc := range []struct {
+		name, pattern, value string
+		want                 bool
+	}{
+		{"positive lookahead", `^(?=.*[0-9]).+$`, "abc1", true},
+		{"failed lookahead", `^(?=.*[0-9]).+$`, "abc", false},
+		{"negative lookahead", `^(?!bad).+$`, "good", true},
+		{"failed negative lookahead", `^(?!bad).+$`, "bad", false},
+		{"lookbehind", `(?<=prefix)value`, "prefixvalue", true},
+		{"negative lookbehind", `(?<!prefix)value`, "othervalue", true},
+		{"backreference", `^(a+)\1$`, "aaaa", true},
+		{"failed backreference", `^(a+)\1$`, "aaa", false},
+		{"named backreference", `^(?<word>ab)\k<word>$`, "abab", true},
+		{"unicode whitespace", `^\s$`, "\u00a0", true},
+		{"unicode line separator", `^\s$`, "\u2028", true},
+		{"dot excludes carriage return", `^.$`, "\r", false},
+		{"dot excludes line separator", `^.$`, "\u2028", false},
+		{"unicode code point", `^\u{1F600}$`, "😀", true},
+		{"unicode surrogate pair", `^\uD83D\uDE00$`, "😀", true},
+		{"unicode property", `^\p{Script=Greek}+$`, "αβ", true},
+		{"unicode dot", `^.$`, "😀", true},
+		{"ASCII digits", `^\d$`, "١", false},
+		{"ASCII word", `^\w$`, "é", false},
+		{"no implicit anchoring", `abc`, "xabcx", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			re := mustRegex(t, tc.pattern)
+			if got := re.MatchString(tc.value); got != tc.want {
+				t.Fatalf("%q on %q: got %v, want %v", tc.pattern, tc.value, got, tc.want)
+			}
+		})
+	}
+	for _, source := range []string{`[`, `(`, `a++`, `(?P<name>a)`, `^\141$`} {
+		if _, err := compat.Compile(source, regexp2.ECMAScript|regexp2.Unicode); err == nil {
+			t.Errorf("expected an ECMAScript syntax error for %q", source)
+		}
+	}
+}
+
+func TestLongRegexMatches(t *testing.T) {
+	value := strings.Repeat("ab", 25000)
+	re := mustRegex(t, `^(a|b)+$`)
+	for _, check := range []compiledCheck{
+		stringCheck(true, 0, math.Inf(1), re, nil),
+		stringCheck(false, 0, math.Inf(1), re, nil),
+		stringCheck(true, 1, math.Inf(1), re, nil),
+	} {
+		if !check.check(value) || !check.test(value, nil) || check.check(value+"c") || check.test(value+"c", nil) {
+			t.Fatal("long string matching disagrees")
+		}
+	}
+}
 
 func TestBasicTypeChecks(t *testing.T) {
 	checks := []struct {
@@ -119,7 +185,7 @@ func TestLeafOk(t *testing.T) {
 		{"integer bounds", 10, bounds, uint8(2), 2.5},
 		{"number bounds", 11, bounds, 2.5, 4},
 		{"string bounds", 12, Bounds{Min: 2, Max: 3}, "a😀", "😀"},
-		{"pattern", 13, regexp.MustCompile("^a"), "abc", "bac"},
+		{"pattern", 13, mustRegex(t, "^a"), "abc", "bac"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,7 +209,7 @@ func TestLeafOk(t *testing.T) {
 			}
 		}
 	}
-	if leafOk(12, 42, Bounds{}) || leafOk(13, 42, regexp.MustCompile(".*")) {
+	if leafOk(12, 42, Bounds{}) || leafOk(13, 42, mustRegex(t, ".*")) {
 		t.Fatal("string leaves must reject non-strings")
 	}
 }
@@ -503,9 +569,9 @@ func TestStringFactory(t *testing.T) {
 	}{
 		{"strict length", stringCheck(true, 2, 3, nil, nil), 12, "a😀", "😀"},
 		{"loose length", stringCheck(false, 2, 3, nil, nil), 0, 42, "😀"},
-		{"strict pattern", stringCheck(true, 0, math.Inf(1), regexp.MustCompile("^a"), nil), 13, "abc", 42},
-		{"loose pattern", stringCheck(false, 0, math.Inf(1), regexp.MustCompile("^a"), nil), 0, 42, "bac"},
-		{"combined", stringCheck(true, 2, 3, regexp.MustCompile("^a"), func(s string) bool { return s != "abc" }), 0, "ab", "abc"},
+		{"strict pattern", stringCheck(true, 0, math.Inf(1), mustRegex(t, "^a"), nil), 13, "abc", 42},
+		{"loose pattern", stringCheck(false, 0, math.Inf(1), mustRegex(t, "^a"), nil), 0, 42, "bac"},
+		{"combined", stringCheck(true, 2, 3, mustRegex(t, "^a"), func(s string) bool { return s != "abc" }), 0, "ab", "abc"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -520,7 +586,7 @@ func TestStringFactory(t *testing.T) {
 		})
 	}
 	calls := 0
-	check := stringCheck(false, 2, 3, regexp.MustCompile("^a"), func(string) bool { calls++; return true })
+	check := stringCheck(false, 2, 3, mustRegex(t, "^a"), func(string) bool { calls++; return true })
 	if !check.check(42) || check.check("a") || check.check("bb") || calls != 0 {
 		t.Fatal("format must run only after type, length and pattern checks")
 	}
@@ -755,8 +821,8 @@ func TestObjectCoreChecks(t *testing.T) {
 func TestOpenObjectPatterns(t *testing.T) {
 	entries := []propertyEntry{{key: "xz", check: typeCheck([]any{"integer"})}}
 	patterns := []patternEntry{
-		{regexp.MustCompile("^x"), typeChecks["number"]},
-		{regexp.MustCompile("z$"), plainCheck(func(v any) bool { n, ok := numericValue(v); return ok && n >= 0 })},
+		{mustRegex(t, "^x"), typeChecks["number"]},
+		{mustRegex(t, "z$"), plainCheck(func(v any) bool { n, ok := numericValue(v); return ok && n >= 0 })},
 	}
 	check := openObject(entries, []string{"extra"}, patterns, typeChecks["boolean"], GuardStrict)
 	for _, tc := range []struct {
@@ -954,7 +1020,7 @@ func TestScopePropagation(t *testing.T) {
 		{"array guard", guardArray(probe, true), []any{}},
 		{"declared property", declaredObject([]propertyEntry{{"x", probe, true}}, 1, true, GuardStrict), map[string]any{"x": "ok"}},
 		{"open property", openObject([]propertyEntry{{"x", probe, true}}, nil, nil, compiledCheck{}, GuardStrict), map[string]any{"x": "ok"}},
-		{"pattern", openObject(nil, nil, []patternEntry{{regexp.MustCompile("^x"), probe}}, compiledCheck{}, GuardStrict), map[string]any{"x": "ok"}},
+		{"pattern", openObject(nil, nil, []patternEntry{{mustRegex(t, "^x"), probe}}, compiledCheck{}, GuardStrict), map[string]any{"x": "ok"}},
 		{"additional", openObject(nil, nil, nil, probe, GuardStrict), map[string]any{"x": "ok"}},
 		{"property name", propertyNamesCheck(probe), map[string]any{"x": 1}},
 		{"dependent schema", dependentSchemasCheck([]schemaDependency{{"x", probe}}), map[string]any{"x": 1}},

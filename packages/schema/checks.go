@@ -5,10 +5,11 @@ import (
 	"math"
 	"math/big"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/dlclark/regexp2/v2/compat"
 )
 
 func always(any) bool     { return true }
@@ -108,7 +109,7 @@ func leafOk(code int, x, arg any) bool {
 		return ok && lengthOk(s, b.Min, b.Max)
 	case 13:
 		s, ok := x.(string)
-		return ok && arg.(*regexp.Regexp).MatchString(s)
+		return ok && arg.(*compat.Regexp).MatchString(s)
 	default:
 		return true
 	}
@@ -229,7 +230,7 @@ func bytesCheck(min, max float64) compiledCheck {
 }
 
 // The string keywords: length bounds, pattern and format.
-func stringCheck(strict bool, min, max float64, re *regexp.Regexp, format func(string) bool) compiledCheck {
+func stringCheck(strict bool, min, max float64, re *compat.Regexp, format func(string) bool) compiledCheck {
 	if re != nil && min == 0 && math.IsInf(max, 1) && format == nil {
 		if strict {
 			return leaf(13, re, func(v any) bool {
@@ -599,7 +600,7 @@ type propertyEntry struct {
 }
 
 type patternEntry struct {
-	pattern *regexp.Regexp
+	pattern *compat.Regexp
 	check   compiledCheck
 }
 
