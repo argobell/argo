@@ -1,5 +1,9 @@
 package schema
 
+// The compiler: a schema to one check closure, built once. Keywords group by the
+// type they constrain, and common shapes (closed objects, arrays of one item
+// schema, tagged unions, leaf schemas) get one specialized closure each.
+
 import (
 	"errors"
 	"fmt"
@@ -13,8 +17,7 @@ import (
 	"github.com/dlclark/regexp2/v2/compat"
 )
 
-// A cached schema retains its identity while its check is being compiled.
-// Recursive checks capture only the slot, not the schema or compiler.
+// A cached schema retains its identity and the slot recursive references use.
 type cachedSchema struct {
 	node  map[string]any
 	check *compiledCheck
@@ -32,10 +35,12 @@ type cachedAnnotatingSchema struct {
 	check *annotatingCheck
 }
 
-// Restart compilation with dynamic scope tracking on a bookended $dynamicRef.
+// Returned when compilation without dynamic scope tracking meets a bookended
+// $dynamicRef: compile again with it.
 var errDynamicScope = errors.New("dynamic scope required")
 
-// One compilation. Dynamic references retain the compiler for lazy targets.
+// One compile of a schema. A bookended $dynamicRef keeps its compiler for
+// targets resolved at run time against the dynamic scope.
 type compiler struct {
 	schema          any
 	r               *resolver
@@ -122,7 +127,9 @@ func (c *compiler) build(node map[string]any, base string) (compiledCheck, error
 	return check, err
 }
 
-// Share bare type checks and the check for schemas with no assertions.
+// The shared check of a schema that is only a type (with annotations), or the
+// true check for one with no assertion at all. The boolean reports whether such
+// a check applies.
 func (c *compiler) bareType(node map[string]any) (compiledCheck, bool) {
 	for key := range node {
 		if key != "type" {
@@ -143,7 +150,7 @@ func (c *compiler) bareType(node map[string]any) (compiledCheck, bool) {
 	return check, found
 }
 
-// Type-specific assertions followed by in-place assertions.
+// Every keyword of node, without tracking annotations.
 func (c *compiler) plain(node map[string]any, base string) (compiledCheck, error) {
 	var parts []compiledCheck
 	value, typed := node["type"]
@@ -216,7 +223,7 @@ func (c *compiler) plain(node map[string]any, base string) (compiledCheck, error
 	return and(parts), nil
 }
 
-// Assertions on the value itself, independent of its type.
+// The keywords that apply to the value itself, whatever its type.
 func (c *compiler) inPlace(node map[string]any, base string, parts []compiledCheck) ([]compiledCheck, error) {
 	if values, ok := node["enum"].([]any); ok {
 		parts = append(parts, enumCheck(values))
@@ -314,8 +321,8 @@ func (c *compiler) union(branches []any, base string, exactlyOne bool) (compiled
 	return anyOf(checks), nil
 }
 
-// Pure primitive constants form an enum. Duplicate oneOf constants retain
-// their individual checks because matching two alternatives must fail.
+// anyOf/oneOf whose branches are all {const: primitive}: an enum. Distinct
+// values make oneOf the same; duplicates retain their individual checks.
 func constUnion(branches []any, exactlyOne bool) (compiledCheck, bool) {
 	values := make([]any, 0, len(branches))
 	for _, branch := range branches {
@@ -346,8 +353,8 @@ func constUnion(branches []any, exactlyOne bool) (compiledCheck, bool) {
 	return enumCheck(values), true
 }
 
-// Bare-type alternatives in anyOf share one type-mask check. Other branches
-// retain their order after the type test.
+// anyOf: its bare-type branches run as one type test, followed by the remaining
+// branches in their original order.
 func anyOf(checks []compiledCheck) compiledCheck {
 	mask := 0
 	var rest []compiledCheck
@@ -364,7 +371,8 @@ func anyOf(checks []compiledCheck) compiledCheck {
 	return maskedAnyCheck(mask, rest)
 }
 
-// Object alternatives with distinct required constant tags select one branch.
+// anyOf/oneOf whose branches are all objects with a distinct required const on
+// one key: the tag picks the branch.
 func (c *compiler) tagged(branches []any, base string) (compiledCheck, error) {
 	if len(branches) < 2 {
 		return compiledCheck{}, nil
@@ -420,7 +428,8 @@ func (c *compiler) tagged(branches []any, base string) (compiledCheck, error) {
 	return compiledCheck{}, nil
 }
 
-// A primitive const on a required property of an object schema.
+// The tag of a tagged-union branch: a primitive const on a required property of
+// an object schema.
 func tagOf(node map[string]any, key string) (any, bool) {
 	if node["type"] != "object" {
 		return nil, false
@@ -485,7 +494,8 @@ func (c *compiler) numberGroup(node map[string]any, mode int) compiledCheck {
 	return numberCheck(mode, bounds[0], bounds[1], bounds[2], bounds[3], bounds[4])
 }
 
-// Object assertions are guarded together; core-only shapes use one closure.
+// A schema with only the core object keywords gets one closure that also does
+// the type guard.
 func (c *compiler) objectGroup(node map[string]any, base string, strict bool) (compiledCheck, error) {
 	onlyCore := true
 	for _, keyword := range [...]string{"propertyNames", "minProperties", "maxProperties", "dependentRequired", "dependentSchemas", "dependencies"} {
@@ -626,7 +636,6 @@ func (c *compiler) objectCore(node map[string]any, base string, guard Guard) (co
 	return openObject(entries, extraRequired, pats, extra, guard), nil
 }
 
-// Array assertions preserve tuple selection and draft-specific contains bounds.
 func (c *compiler) arrayGroup(node map[string]any, base string, strict bool) (compiledCheck, error) {
 	var prefix []any
 	rest := node["items"]
@@ -660,6 +669,7 @@ func (c *compiler) arrayGroup(node map[string]any, base string, strict bool) (co
 	}
 	hasItems := len(checks) > 0 || restCheck.run != nil
 	if !hasKeyword(node, "contains") && node["uniqueItems"] != true && hasItems {
+		// The common array: one closure for the guard, the length bounds and the items.
 		guard := GuardLoose
 		if strict {
 			guard = GuardStrict
@@ -741,8 +751,8 @@ func (c *compiler) ref(ref, base string) (compiledCheck, error) {
 	return check, err
 }
 
-// The initial target and anchor name of a dynamically resolved $dynamicRef.
-// An empty name means the reference follows ordinary static resolution.
+// The initial target and anchor name of a $dynamicRef that resolves dynamically,
+// or an empty name for a plain ref.
 func (c *compiler) bookended(ref, base string) (resolved, string, error) {
 	initial, err := c.r.resolve(ref, base)
 	if err != nil {
@@ -761,9 +771,9 @@ func (c *compiler) bookended(ref, base string) (resolved, string, error) {
 	return initial, name, nil
 }
 
-// Targets are compiled only when reached through the dynamic scope. The
-// compiler lock protects all lazy caches and indexes; checks run after it is
-// released. An invalid selected target panics, like a failed runtime compilation.
+// Resolved at run time against the dynamic scope. The compiler lock protects
+// lazy caches and indexes; checks run after it is released. Compilation errors
+// in a selected target panic.
 func dynamicLookup[T any](c *compiler, name string, compile func(any, string) (T, error)) func(string) (T, bool) {
 	type result struct {
 		check T
@@ -814,7 +824,8 @@ func (c *compiler) dynamicRef(ref, base string) (compiledCheck, error) {
 	}}, nil
 }
 
-// The check of a schema evaluated in place below unevaluatedProperties/items.
+// The annotating check of a schema evaluated in place, only below
+// unevaluatedProperties/unevaluatedItems.
 func (c *compiler) annotating(value any, base string) (annotatingCheck, error) {
 	if truth, ok := value.(bool); ok {
 		return func(any, *annotations, *evaluationScope) bool { return truth }, nil
@@ -1057,7 +1068,8 @@ func (c *compiler) annotatingDynamicRef(ref, base string) (annotatingCheck, erro
 	}, nil
 }
 
-// Keywords whose annotations are collected separately from the plain check.
+// The keywords an annotating check handles itself; every other keyword compiles
+// into its plain part.
 var annotatingKeywords = map[string]struct{}{
 	"properties": {}, "patternProperties": {}, "additionalProperties": {},
 	"prefixItems": {}, "items": {}, "additionalItems": {}, "contains": {},
@@ -1066,7 +1078,7 @@ var annotatingKeywords = map[string]struct{}{
 	"dependentSchemas": {}, "unevaluatedProperties": {}, "unevaluatedItems": {},
 }
 
-// Keywords that never affect a boolean check.
+// Keywords that never affect a check.
 var neutralKeywords = map[string]struct{}{
 	"$schema": {}, "$comment": {}, "title": {}, "description": {},
 	"default": {}, "examples": {}, "deprecated": {}, "readOnly": {}, "writeOnly": {},

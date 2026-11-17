@@ -26,9 +26,9 @@ type resolverOptions struct {
 	rejectUnresolved bool
 }
 
-// Resolves references in the root schema and registered documents. Indexing is
-// deferred until the first reference or $id; registered documents load on demand.
-// A resolver belongs to one compilation or diagnostic walk.
+// Resolves references in the root schema and the registered documents. The schema
+// is indexed on the first reference or the first $id a walker meets, so a schema
+// with neither is never walked for identifiers.
 type resolver struct {
 	draft          string
 	root           any
@@ -69,8 +69,8 @@ func isSchemaObject(value any) bool {
 	return ok && node != nil
 }
 
-// The base URI of node, whose parent has base. Indexed nodes already include
-// their own $id, so a resolved reference target never applies a relative $id twice.
+// The base URI of node, whose parent has base: its $id changes it, unless draft 7
+// makes the $id inert. Once indexed, a resolved reference target has its own base.
 func (r *resolver) baseFor(node map[string]any, base string) string {
 	if known, found := r.baseOf[schemaID(node)]; found {
 		return known.base
@@ -79,6 +79,7 @@ func (r *resolver) baseFor(node map[string]any, base string) string {
 	if !ok {
 		return base
 	}
+	// Index before applying an $id: the caller's base may already include it.
 	if !r.indexed {
 		r.ensureIndexed()
 		if known, found := r.baseOf[schemaID(node)]; found {
@@ -105,8 +106,9 @@ func (r *resolver) ensureIndexed() {
 	r.index(r.root, defaultBase)
 }
 
-// The schema a reference names. Missing references return an error, or resolve
-// to false when rejectUnresolved is enabled. Only those references are recorded.
+// The schema a reference names, with the base URI it compiles under. Returns an
+// error if it names nothing, or, with rejectUnresolved, resolves to false, the
+// schema no value passes.
 func (r *resolver) resolve(ref, base string) (resolved, error) {
 	r.ensureIndexed()
 	target, err := r.find(ref, base)
@@ -156,8 +158,8 @@ func (r *resolver) isResource(node map[string]any, base string) bool {
 	return ok && root != nil && node != nil && schemaID(root) == schemaID(node)
 }
 
-// Walk only keywords that hold subschemas. Identifiers inside const, enum,
-// examples or unknown keywords do not register resources or anchors.
+// Walks only keywords that hold subschemas: an $id inside enum, const or an
+// unknown keyword names nothing.
 func (r *resolver) index(value any, base string) {
 	if !isSchemaObject(value) {
 		return
@@ -167,6 +169,7 @@ func (r *resolver) index(value any, base string) {
 	if _, found := r.baseOf[identity]; found {
 		return
 	}
+	// In draft 7 a $ref makes every sibling keyword, $id included, inert.
 	_, refOnly := node["$ref"].(string)
 	refOnly = refOnly && r.draft == "7"
 	if id, ok := node["$id"].(string); ok && !refOnly {

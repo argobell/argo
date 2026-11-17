@@ -1,7 +1,8 @@
 package schema
 
-// Annotation tracking for unevaluatedProperties and unevaluatedItems. Only
-// schemas that use those keywords compile into these closures.
+// Annotation tracking for unevaluatedProperties and unevaluatedItems: annotating
+// checks record which properties and items a schema evaluated. Only schemas that
+// use those keywords compile into these closures.
 
 // What a schema evaluated: property names (or all of them), the evaluated item
 // prefix, and items matched by contains. The zero value has no annotations.
@@ -49,7 +50,7 @@ func indirectAnnotating(slot *annotatingCheck) annotatingCheck {
 	return func(v any, a *annotations, scope *evaluationScope) bool { return (*slot)(v, a, scope) }
 }
 
-// A plain check in annotating position evaluates nothing that unevaluated* sees.
+// A plain check in annotating position: it evaluates nothing that unevaluated* sees.
 func ignoreAnnotations(check compiledCheck) annotatingCheck {
 	return func(v any, _ *annotations, scope *evaluationScope) bool { return check.test(v, scope) }
 }
@@ -189,7 +190,7 @@ func annotateArray(prefix []compiledCheck, rest, contains compiledCheck, minCont
 	}
 }
 
-// Every passing anyOf branch contributes its annotations; oneOf requires one.
+// anyOf (or oneOf when exactlyOne): every passing branch contributes its annotations.
 func annotateAny(branches []annotatingCheck, exactlyOne bool) annotatingCheck {
 	return func(v any, a *annotations, scope *evaluationScope) bool {
 		n := 0
@@ -207,7 +208,7 @@ func annotateAny(branches []annotatingCheck, exactlyOne bool) annotatingCheck {
 	}
 }
 
-// A passing if contributes its annotations even without then.
+// if, then and else: a passing if contributes its annotations even without then.
 func annotateIf(condition, then, otherwise annotatingCheck) annotatingCheck {
 	return func(v any, a *annotations, scope *evaluationScope) bool {
 		var b annotations
@@ -231,7 +232,7 @@ func annotateDependent(key string, check annotatingCheck) annotatingCheck {
 	}
 }
 
-// Every property no other keyword evaluated passes check.
+// unevaluatedProperties: every property no other keyword evaluated passes check.
 func unevaluatedProperties(check compiledCheck) annotatingCheck {
 	return func(v any, a *annotations, scope *evaluationScope) bool {
 		object, ok := v.(map[string]any)
@@ -248,7 +249,7 @@ func unevaluatedProperties(check compiledCheck) annotatingCheck {
 	}
 }
 
-// Every item no other keyword evaluated passes check.
+// unevaluatedItems: every item no other keyword evaluated passes check.
 func unevaluatedItems(check compiledCheck) annotatingCheck {
 	return func(v any, a *annotations, scope *evaluationScope) bool {
 		array, ok := v.([]any)

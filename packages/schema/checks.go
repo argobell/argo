@@ -40,8 +40,7 @@ type Leaf struct {
 	Arg  any
 }
 
-// Compiled checks carry their leaf and bare-type information explicitly.
-// No function identity or global metadata registry is needed.
+// A compiled check with its leaf and bare-type information.
 type compiledCheck struct {
 	run     func(any, *evaluationScope) bool
 	leaf    Leaf
@@ -770,7 +769,7 @@ func dependentSchemasCheck(entries []schemaDependency) compiledCheck {
 }
 
 // The common array: guard, length bounds, prefix items and the items after them,
-// in one closure. A zero compiledCheck means no rest check; its zero Leaf is NO_LEAF.
+// in one closure. A zero compiledCheck means no rest check.
 func listCheck(guard Guard, min, max float64, prefix []compiledCheck, rest compiledCheck) compiledCheck {
 	return compiledCheck{run: func(v any, scope *evaluationScope) bool {
 		list, ok := v.([]any)
