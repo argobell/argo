@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -75,6 +76,77 @@ func TestCoercePrimitives(t *testing.T) {
 	c := coerceTestSchema(t, `{"type":"integer"}`, compilerOptions{})
 	if got := c.coerce("-0").(float64); got != 0 || !math.Signbit(got) {
 		t.Fatal("integer conversion lost negative zero")
+	}
+}
+
+func TestCoerceKeywordCase(t *testing.T) {
+	for _, name := range []string{"null", "undefined", "boolean", "number", "bigint"} {
+		t.Run(name, func(t *testing.T) {
+			c := coerceTestSchema(t, `{"type":"`+name+`"}`, compilerOptions{})
+			for _, input := range []string{"UNDEFİNED", "undefıned", "falſe", "ＦＡＬＳＥ", " true "} {
+				if got := c.coerce(input); got != input {
+					t.Fatalf("coerce(%q) = %v, want the original string", input, got)
+				}
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, input string
+		want        any
+	}{
+		{"null", "UnDeFiNeD", nil},
+		{"null", "NuLl", nil},
+		{"undefined", "UnDeFiNeD", Undefined},
+		{"undefined", "NuLl", Undefined},
+		{"boolean", "FaLsE", false},
+		{"boolean", "TrUe", true},
+		{"number", "FaLsE", 0},
+		{"number", "TrUe", 1},
+		{"bigint", "FaLsE", big.NewInt(0)},
+		{"bigint", "TrUe", big.NewInt(1)},
+	} {
+		c := coerceTestSchema(t, `{"type":"`+tc.name+`"}`, compilerOptions{})
+		if got := c.coerce(tc.input); !deepEqual(got, tc.want) {
+			t.Fatalf("%s coercion of %q = %v, want %v", tc.name, tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestCoerceRequiredNulls(t *testing.T) {
+	c := coerceTestSchema(t, `{"type":"object","properties":{"required":{"type":"integer"},"optional":{"type":"integer"},"nullable":{"type":["integer","null"]},"missing":{"type":"integer"}},"required":["required","missing","required"]}`, compilerOptions{})
+	input := map[string]any{"required": nil, "optional": nil, "nullable": nil}
+	pass := conversion{coercer: c}
+	if got := pass.dropOptionalNulls(input, c.schema, defaultBase); !deepEqual(got, map[string]any{"required": nil, "nullable": nil}) {
+		t.Fatalf("optional null removal = %v", got)
+	}
+	if got := c.coerce(input); !deepEqual(got, map[string]any{"required": 0, "nullable": nil}) {
+		t.Fatalf("required null conversion = %v", got)
+	}
+	if len(input) != 3 || input["required"] != nil || input["optional"] != nil {
+		t.Fatal("null removal modified its input")
+	}
+}
+
+func BenchmarkDropRequiredNulls(b *testing.B) {
+	for _, count := range []int{1000, 2000, 4000} {
+		b.Run(strconv.Itoa(count), func(b *testing.B) {
+			properties := make(map[string]any, count)
+			required := make([]any, count)
+			value := make(map[string]any, count)
+			for i := range count {
+				key := "p" + strconv.Itoa(i)
+				properties[key] = map[string]any{"type": "integer"}
+				required[i] = key
+				value[key] = nil
+			}
+			schema := map[string]any{"type": "object", "properties": properties, "required": required}
+			c := newCoercer(newCompiler(schema, compilerOptions{}), schema)
+			pass := conversion{coercer: c}
+			b.ReportAllocs()
+			for b.Loop() {
+				pass.dropOptionalNulls(value, schema, defaultBase)
+			}
+		})
 	}
 }
 

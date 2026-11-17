@@ -198,7 +198,14 @@ func (p *conversion) dropOptionalNulls(value, schema any, base string) any {
 	if len(patterns) == 0 && !isSchemaObject(additional) && !isSchemaObject(node["properties"]) {
 		return value
 	}
-	required, _ := node["required"].([]any)
+	required := make(map[string]struct{})
+	if names, ok := node["required"].([]any); ok {
+		for _, name := range names {
+			if key, ok := name.(string); ok {
+				required[key] = struct{}{}
+			}
+		}
+	}
 	var out map[string]any
 	set := func(key string, next any) {
 		current := object
@@ -227,7 +234,8 @@ func (p *conversion) dropOptionalNulls(value, schema any, base string) any {
 		if s, ok := property.(map[string]any); ok {
 			_, isRef = s["$ref"].(string)
 		}
-		if v == nil && !slices.ContainsFunc(required, func(r any) bool { return sameCoercionValue(r, key) }) && !isRef {
+		_, isRequired := required[key]
+		if v == nil && !isRequired && !isRef {
 			valid, known := p.passes(property, b, nil)
 			if known && !valid {
 				if out == nil {
@@ -725,7 +733,7 @@ func tryNumber(value any) (float64, bool) {
 		if n, ok := coercionNumber(v); ok {
 			return n, true
 		}
-		switch strings.ToLower(v) {
+		switch lowerCoercionKeyword(v) {
 		case "false":
 			return 0, true
 		case "true":
@@ -807,7 +815,7 @@ func tryBigInt(value any) (*big.Int, bool) {
 		if n, ok := bigIntOfString(v); ok {
 			return n, true
 		}
-		switch strings.ToLower(v) {
+		switch lowerCoercionKeyword(v) {
 		case "false":
 			return big.NewInt(0), true
 		case "true":
@@ -815,6 +823,16 @@ func tryBigInt(value any) (*big.Int, bool) {
 		}
 	}
 	return nil, false
+}
+
+// Conversion keywords accept ASCII case variants; Unicode lookalikes stay distinct.
+func lowerCoercionKeyword(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, value)
 }
 
 func tryUndefined(value any) bool {
@@ -830,7 +848,7 @@ func tryUndefined(value any) bool {
 	case bool:
 		return !v
 	case string:
-		lower := strings.ToLower(v)
+		lower := lowerCoercionKeyword(v)
 		return lower == "undefined" || lower == "null" || v == "" || v == "0"
 	}
 	return false
@@ -848,7 +866,7 @@ func tryBoolean(value any) (bool, bool) {
 	case nil, undefinedValue:
 		return false, true
 	case string:
-		lower := strings.ToLower(v)
+		lower := lowerCoercionKeyword(v)
 		if lower == "false" || v == "0" {
 			return false, true
 		}
