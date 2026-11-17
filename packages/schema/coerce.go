@@ -23,10 +23,12 @@ import (
 type coercer struct {
 	c      *compiler
 	schema any
+	// Prepared object keywords are immutable once published, protected by c.mu.
+	objects map[uintptr]*coercionObjectKeywords
 }
 
 func newCoercer(c *compiler, schema any) *coercer {
-	return &coercer{c: c, schema: schema}
+	return &coercer{c: c, schema: schema, objects: make(map[uintptr]*coercionObjectKeywords)}
 }
 
 // value coerced: a copy along the changed paths only, or value itself.
@@ -193,18 +195,11 @@ func (p *conversion) dropOptionalNulls(value, schema any, base string) any {
 		return value
 	}
 	properties, _ := node["properties"].(map[string]any)
-	patterns := coercionPatterns(node)
+	keywords := p.objectKeywords(node)
+	patterns := keywords.patterns
 	additional := node["additionalProperties"]
 	if len(patterns) == 0 && !isSchemaObject(additional) && !isSchemaObject(node["properties"]) {
 		return value
-	}
-	required := make(map[string]struct{})
-	if names, ok := node["required"].([]any); ok {
-		for _, name := range names {
-			if key, ok := name.(string); ok {
-				required[key] = struct{}{}
-			}
-		}
 	}
 	var out map[string]any
 	set := func(key string, next any) {
@@ -224,7 +219,7 @@ func (p *conversion) dropOptionalNulls(value, schema any, base string) any {
 		}
 		out[key] = next
 	}
-	for _, key := range slices.Sorted(maps.Keys(properties)) {
+	for _, key := range keywords.keys {
 		v, present := object[key]
 		if !present {
 			continue
@@ -234,7 +229,7 @@ func (p *conversion) dropOptionalNulls(value, schema any, base string) any {
 		if s, ok := property.(map[string]any); ok {
 			_, isRef = s["$ref"].(string)
 		}
-		_, isRequired := required[key]
+		_, isRequired := keywords.required[key]
 		if v == nil && !isRequired && !isRef {
 			valid, known := p.passes(property, b, nil)
 			if known && !valid {
@@ -450,7 +445,7 @@ func (p *conversion) convertObject(node map[string]any, base string, value any) 
 		return value
 	}
 	properties, _ := node["properties"].(map[string]any)
-	patterns := coercionPatterns(node)
+	patterns := p.objectKeywords(node).patterns
 	additional := node["additionalProperties"]
 	var out map[string]any
 	for _, key := range slices.Sorted(maps.Keys(object)) {
@@ -545,7 +540,8 @@ func (p *conversion) coerceProperties(value any, schema map[string]any, base str
 		return value
 	}
 	properties, _ := schema["properties"].(map[string]any)
-	patterns := coercionPatterns(schema)
+	keywords := p.objectKeywords(schema)
+	patterns := keywords.patterns
 	additional := schema["additionalProperties"]
 	var out map[string]any
 	set := func(key string, next any) {
@@ -561,7 +557,7 @@ func (p *conversion) coerceProperties(value any, schema map[string]any, base str
 		}
 		out[key] = next
 	}
-	for _, key := range slices.Sorted(maps.Keys(properties)) {
+	for _, key := range keywords.keys {
 		if v, present := object[key]; present {
 			set(key, p.coerceTypes(v, properties[key], base))
 		}
@@ -619,18 +615,44 @@ type coercionPattern struct {
 	schema  any
 }
 
+type coercionObjectKeywords struct {
+	node     map[string]any // Retains the identity used as the cache key.
+	keys     []string
+	required map[string]struct{}
+	patterns []coercionPattern
+}
+
+// Prepare schema keywords once for all three passes and subsequent calls.
 // Overlapping patterns convert in sorted order, independent of map iteration.
-func coercionPatterns(node map[string]any) []coercionPattern {
+func (c *coercer) objectKeywords(node map[string]any) *coercionObjectKeywords {
+	c.c.mu.Lock()
+	defer c.c.mu.Unlock()
+	identity := schemaID(node)
+	if known, found := c.objects[identity]; found {
+		return known
+	}
+	properties, _ := node["properties"].(map[string]any)
+	names, _ := node["required"].([]any)
+	keywords := &coercionObjectKeywords{
+		node:     node,
+		keys:     slices.Sorted(maps.Keys(properties)),
+		required: make(map[string]struct{}, len(names)),
+	}
+	for _, name := range names {
+		if key, ok := name.(string); ok {
+			keywords.required[key] = struct{}{}
+		}
+	}
 	schemas, _ := node["patternProperties"].(map[string]any)
-	var patterns []coercionPattern
 	for _, pattern := range slices.Sorted(maps.Keys(schemas)) {
 		re, err := compat.Compile(pattern, regexp2.ECMAScript|regexp2.Unicode, regexp2.OptionMaxBacktrackingStackSize(-1))
 		if err != nil {
 			panic(err)
 		}
-		patterns = append(patterns, coercionPattern{re, schemas[pattern]})
+		keywords.patterns = append(keywords.patterns, coercionPattern{re, schemas[pattern]})
 	}
-	return patterns
+	c.objects[identity] = keywords
+	return keywords
 }
 
 // A tuple's prefix, then items. Draft 7's additionalItems is not coerced.

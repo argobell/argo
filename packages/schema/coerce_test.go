@@ -127,6 +127,43 @@ func TestCoerceRequiredNulls(t *testing.T) {
 	}
 }
 
+func BenchmarkCoerce(b *testing.B) {
+	for _, tc := range []struct {
+		name, schema string
+		input        any
+	}{
+		{"integer", `{"type":"integer"}`, "42"},
+		{"object", `{"type":"object","properties":{"count":{"type":"integer"},"active":{"type":"boolean"},"name":{"type":"string"}},"required":["count","active","name"]}`, map[string]any{"count": "42", "active": "true", "name": "tool"}},
+		{"unchanged object", `{"type":"object","properties":{"count":{"type":"integer"},"active":{"type":"boolean"},"name":{"type":"string"}},"required":["count","active","name"]}`, map[string]any{"count": 42, "active": true, "name": "tool"}},
+		{"pattern rows", `{"type":"array","items":{"type":"object","patternProperties":{"^n_":{"type":"integer"},"^flag_":{"type":"boolean"}},"additionalProperties":{"type":"string"}}}`, func() any {
+			rows := make([]any, 100)
+			for i := range rows {
+				rows[i] = map[string]any{"n_count": "42", "flag_active": "true", "label": "item"}
+			}
+			return rows
+		}()},
+		{"tuple", `{"type":"array","prefixItems":[{"type":["integer","null"]},{"type":"boolean"}]}`, []any{"42", "true"}},
+		{"recursive", `{"anyOf":[{"type":"integer"},{"type":"array","items":{"$ref":"#"}}]}`, []any{"1", []any{"2", []any{"3"}}}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			var schema any
+			if err := json.Unmarshal([]byte(tc.schema), &schema); err != nil {
+				b.Fatal(err)
+			}
+			compiler := newCompiler(schema, compilerOptions{})
+			if _, err := compiler.root(); err != nil {
+				b.Fatal(err)
+			}
+			c := newCoercer(compiler, schema)
+			c.coerce(tc.input)
+			b.ReportAllocs()
+			for b.Loop() {
+				c.coerce(tc.input)
+			}
+		})
+	}
+}
+
 func BenchmarkDropRequiredNulls(b *testing.B) {
 	for _, count := range []int{1000, 2000, 4000} {
 		b.Run(strconv.Itoa(count), func(b *testing.B) {
@@ -142,6 +179,7 @@ func BenchmarkDropRequiredNulls(b *testing.B) {
 			schema := map[string]any{"type": "object", "properties": properties, "required": required}
 			c := newCoercer(newCompiler(schema, compilerOptions{}), schema)
 			pass := conversion{coercer: c}
+			pass.dropOptionalNulls(value, schema, defaultBase)
 			b.ReportAllocs()
 			for b.Loop() {
 				pass.dropOptionalNulls(value, schema, defaultBase)
@@ -291,6 +329,55 @@ func TestCoerceUndefinedAndBytes(t *testing.T) {
 	c = coerceTestSchema(t, `{"type":["object","string"],"properties":{"0":{"type":["boolean","null"]}}}`, compilerOptions{})
 	if got := c.coerce(bytes); !reflect.DeepEqual(got, map[string]any{"0": true, "1": float64(0)}) {
 		t.Fatalf("type-array bytes conversion = %v", got)
+	}
+}
+
+func TestCoerceObjectKeywordsConcurrent(t *testing.T) {
+	c := coerceTestSchema(t, `{"type":"object","properties":{"drop":{"type":"integer"}},"patternProperties":{"^n_":{"type":"integer"},"^flag_":{"type":"boolean"}},"additionalProperties":{"type":"string"},"required":["n_count"]}`, compilerOptions{})
+	input := map[string]any{"drop": nil, "n_count": "42", "flag_active": "TRUE", "label": "row"}
+	want := map[string]any{"n_count": 42, "flag_active": true, "label": "row"}
+	// Start with an empty cache, then share the prepared regular expressions.
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 100 {
+				if got := c.coerce(input); !deepEqual(got, want) {
+					t.Errorf("concurrent object conversion = %v", got)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if len(c.objects) != 1 {
+		t.Fatalf("prepared %d object schemas, want 1", len(c.objects))
+	}
+	keywords := c.objects[schemaID(c.schema.(map[string]any))]
+	if keywords == nil || len(keywords.patterns) != 2 {
+		t.Fatal("prepared patterns were not retained")
+	}
+	for range 1000 {
+		c.coerce(input)
+	}
+	if len(c.objects) != 1 || c.objects[schemaID(c.schema.(map[string]any))] != keywords {
+		t.Fatal("repeated conversion replaced or grew the prepared schema cache")
+	}
+	if !deepEqual(input, map[string]any{"drop": nil, "n_count": "42", "flag_active": "TRUE", "label": "row"}) {
+		t.Fatal("cached conversion changed its input")
+	}
+}
+
+func TestCoerceObjectKeywordIsolation(t *testing.T) {
+	c := coerceTestSchema(t, `{"type":"object","properties":{"a":{"type":"object","patternProperties":{"^x":{"type":"integer"}}},"b":{"type":"object","patternProperties":{"^x":{"type":"boolean"}}}},"required":["a","b"]}`, compilerOptions{})
+	for range 10 {
+		input := map[string]any{"a": map[string]any{"x": "1"}, "b": map[string]any{"x": "1"}}
+		want := map[string]any{"a": map[string]any{"x": 1}, "b": map[string]any{"x": true}}
+		if got := c.coerce(input); !deepEqual(got, want) {
+			t.Fatalf("distinct schemas shared conversion rules: %v", got)
+		}
+	}
+	if len(c.objects) != 3 {
+		t.Fatalf("prepared %d object schemas, want 3", len(c.objects))
 	}
 }
 
