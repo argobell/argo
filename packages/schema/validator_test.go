@@ -274,7 +274,9 @@ func TestValidatorLazyInitialization(t *testing.T) {
 	if coerced != 1 || explained != 1 {
 		t.Fatal("successful parse did not initialize only conversion")
 	}
-	if v.coercer() != v.coercer() || v.explainer() != v.explainer() {
+	firstCoercer := v.coercer()
+	firstExplainer := v.explainer()
+	if nextCoercer, nextExplainer := v.coercer(), v.explainer(); nextCoercer != firstCoercer || nextExplainer != firstExplainer {
 		t.Fatal("lazy helpers were rebuilt")
 	}
 }
