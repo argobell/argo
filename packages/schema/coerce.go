@@ -103,7 +103,32 @@ func sameCoercionValue(a, b any) bool {
 	if xn || yn {
 		return xn && yn && x == y
 	}
-	return coercionIdentity(a) == coercionIdentity(b)
+	switch x := a.(type) {
+	case nil:
+		return b == nil
+	case string:
+		y, ok := b.(string)
+		return ok && x == y
+	case bool:
+		y, ok := b.(bool)
+		return ok && x == y
+	case undefinedValue:
+		return isUndefined(b)
+	case *big.Int:
+		y, ok := b.(*big.Int)
+		return ok && x.Cmp(y) == 0
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		return ok && schemaID(x) == schemaID(y)
+	case []any:
+		y, ok := b.([]any)
+		return ok && len(x) == len(y) && reflect.ValueOf(x).UnsafePointer() == reflect.ValueOf(y).UnsafePointer()
+	case []byte:
+		y, ok := b.([]byte)
+		return ok && len(x) == len(y) && reflect.ValueOf(x).UnsafePointer() == reflect.ValueOf(y).UnsafePointer()
+	default:
+		return coercionIdentity(a) == coercionIdentity(b)
+	}
 }
 
 // node converted at a re-entry point: unchanged if that pair is already active.
@@ -157,9 +182,6 @@ func (c *coercer) passes(node any, base string, value any) (valid, known bool) {
 	check, err := func() (compiledCheck, error) {
 		c.c.mu.Lock()
 		defer c.c.mu.Unlock()
-		if isSchemaObject(node) {
-			base = c.c.r.baseFor(node.(map[string]any), base)
-		}
 		return c.c.check(node, base)
 	}()
 	if err != nil {
@@ -169,6 +191,12 @@ func (c *coercer) passes(node any, base string, value any) (valid, known bool) {
 }
 
 func (c *coercer) baseOf(node map[string]any, base string) string {
+	// A type-only schema has no identifiers or child schemas to resolve.
+	if len(node) == 1 {
+		if _, found := node["type"]; found {
+			return base
+		}
+	}
 	c.c.mu.Lock()
 	defer c.c.mu.Unlock()
 	return c.c.r.baseFor(node, base)
@@ -179,9 +207,14 @@ func (p *conversion) dropOptionalNulls(value, schema any, base string) any {
 	if !isSchemaObject(schema) {
 		return value
 	}
+	items, array := value.([]any)
+	object, objectValue := value.(map[string]any)
+	if !array && !objectValue {
+		return value
+	}
 	node := schema.(map[string]any)
 	b := p.baseOf(node, base)
-	if items, ok := value.([]any); ok {
+	if array {
 		return mapItems(items, func(item any, i int) any {
 			itemSchema := itemSchemaAt(node, i)
 			if isUndefined(itemSchema) {
@@ -189,10 +222,6 @@ func (p *conversion) dropOptionalNulls(value, schema any, base string) any {
 			}
 			return p.dropOptionalNulls(item, itemSchema, b)
 		})
-	}
-	object, ok := value.(map[string]any)
-	if !ok {
-		return value
 	}
 	properties, _ := node["properties"].(map[string]any)
 	keywords := p.objectKeywords(node)
@@ -768,8 +797,6 @@ func tryNumber(value any) (float64, bool) {
 	return 0, false
 }
 
-var coercionDecimalPattern = compat.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`, regexp2.ECMAScript|regexp2.Unicode, regexp2.OptionMaxBacktrackingStackSize(-1))
-var coercionRadixPattern = compat.MustCompile(`^0(?:[xX][0-9a-fA-F]+|[bB][01]+|[oO][0-7]+)$`, regexp2.ECMAScript|regexp2.Unicode, regexp2.OptionMaxBacktrackingStackSize(-1))
 var coercionBigIntPattern = compat.MustCompile(`^-?(0|[1-9]\d*)(n|\.\d+)?$`, regexp2.ECMAScript|regexp2.Unicode, regexp2.OptionMaxBacktrackingStackSize(-1))
 
 // The finite subset of Number(string), including radix prefixes and ECMAScript whitespace.
@@ -778,23 +805,45 @@ func coercionNumber(value string) (float64, bool) {
 	if text == "" {
 		return 0, true
 	}
-	if coercionRadixPattern.MatchString(text) {
-		base := 16
+	base := 0
+	if len(text) > 2 && text[0] == '0' {
 		switch text[1] {
+		case 'x', 'X':
+			base = 16
 		case 'b', 'B':
 			base = 2
 		case 'o', 'O':
 			base = 8
 		}
+	}
+	if base != 0 {
+		for i := 2; i < len(text); i++ {
+			digit := -1
+			if text[i] >= '0' && text[i] <= '9' {
+				digit = int(text[i] - '0')
+			} else if text[i] >= 'a' && text[i] <= 'f' {
+				digit = int(text[i]-'a') + 10
+			} else if text[i] >= 'A' && text[i] <= 'F' {
+				digit = int(text[i]-'A') + 10
+			}
+			if digit < 0 || digit >= base {
+				return 0, false
+			}
+		}
 		n, _ := new(big.Int).SetString(text[2:], base)
 		result, _ := new(big.Float).SetInt(n).Float64()
 		return result, isNumber(result)
 	}
-	if !coercionDecimalPattern.MatchString(text) {
-		return 0, false
+	// ParseFloat validates decimal syntax; exclude its hexadecimal and
+	// underscore extensions before parsing.
+	for i := range len(text) {
+		b := text[i]
+		if !(b >= '0' && b <= '9' || b == '+' || b == '-' || b == '.' || b == 'e' || b == 'E') {
+			return 0, false
+		}
 	}
-	n, _ := strconv.ParseFloat(text, 64)
-	return n, isNumber(n)
+	n, err := strconv.ParseFloat(text, 64)
+	return n, err == nil && isNumber(n)
 }
 
 func trimCoercionSpace(value string) string {

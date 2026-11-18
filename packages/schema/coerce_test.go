@@ -79,6 +79,39 @@ func TestCoercePrimitives(t *testing.T) {
 	}
 }
 
+func TestCoercionNumberSyntax(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  float64
+	}{
+		{"", 0}, {"\uFEFF\t\n\u00a0", 0}, {"+12", 12}, {"-12", -12},
+		{"01", 1}, {".5", .5}, {"1.", 1}, {"1.e2", 100}, {"-.5E+2", -50},
+		{"1e-999", 0}, {"5e-324", math.SmallestNonzeroFloat64},
+		{"1.7976931348623157e308", math.MaxFloat64},
+		{"0xff", 255}, {"0XABCD", 43981}, {"0b101", 5}, {"0B11", 3},
+		{"0o077", 63}, {"0O10", 8}, {"0x20000000000001", 9007199254740992},
+	} {
+		if got, ok := coercionNumber(tc.input); !ok || got != tc.want {
+			t.Fatalf("number syntax %q = %v, %v; want %v", tc.input, got, ok, tc.want)
+		}
+	}
+	for _, input := range []string{
+		"+", "-", ".", "1e", "1e+", "1e-", "1e2e3", "1..0", "--1",
+		"1_000", "1e1_0", "0x1p2", "+0x1p2", "-0x1", "0x", "0b", "0o",
+		"0x:", "0x@", "0xG", "0b2", "0o8", "0x1_0", "0b1.0",
+		"Infinity", "Inf", "NaN", "1e999", "١٢", "\u008512", "1 2", "12n",
+	} {
+		if got, ok := coercionNumber(input); ok {
+			t.Fatalf("invalid number syntax %q accepted as %v", input, got)
+		}
+	}
+	for _, input := range []string{"-0", "-0.0", "-1e-999"} {
+		if got, ok := coercionNumber(input); !ok || got != 0 || !math.Signbit(got) {
+			t.Fatalf("negative zero syntax %q = %v, %v", input, got, ok)
+		}
+	}
+}
+
 func TestCoerceKeywordCase(t *testing.T) {
 	for _, name := range []string{"null", "undefined", "boolean", "number", "bigint"} {
 		t.Run(name, func(t *testing.T) {
@@ -392,6 +425,29 @@ func TestCoerceSortedPatterns(t *testing.T) {
 				t.Fatal("overlapping patterns must convert in sorted order")
 			}
 		}
+	}
+}
+
+func TestCoerceRelativeUnionBases(t *testing.T) {
+	for _, keyword := range []string{"anyOf", "oneOf", "allOf"} {
+		t.Run(keyword, func(t *testing.T) {
+			c := coerceTestSchema(t, `{"$id":"https://example.com/root.json","`+keyword+`":[{"$id":"nested/part.json","type":"object","properties":{"a":{"$ref":"value.json"}}}]}`, compilerOptions{schemas: map[string]any{
+				"https://example.com/nested/value.json": map[string]any{"type": "integer"},
+			}})
+			for range 3 {
+				input := map[string]any{"a": "2"}
+				want := map[string]any{"a": 2}
+				if got := c.coerce(input); !deepEqual(got, want) {
+					t.Fatalf("relative union conversion = %v", got)
+				}
+				if got := c.convertOnly(input); !deepEqual(got, want) {
+					t.Fatalf("relative union conversion pass = %v", got)
+				}
+				if input["a"] != "2" {
+					t.Fatal("relative union conversion changed its input")
+				}
+			}
+		})
 	}
 }
 
